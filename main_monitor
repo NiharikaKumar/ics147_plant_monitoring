@@ -1,0 +1,311 @@
+#include <Arduino.h>
+#include <HttpClient.h>
+#include <WiFi.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include <DHT20.h>
+
+DHT20 DHT;
+
+
+
+// This example downloads the URL "http://arduino.cc/"
+char ssid[50]; // your network SSID (name)
+char pass[50]; // your network password (use for WPA, or use as key for WEP)
+
+// Name of the server we want to connect to
+const char kHostname[] = "worldtimeapi.org";
+// Path to download (this is the bit after the hostname in the URL that you want to download
+const char kPath[] = "/api/timezone/Europe/London.txt";
+// Number of milliseconds to wait without receiving any data before we give up
+const int kNetworkTimeout = 30 * 1000;
+// Number of milliseconds to wait if no data is available before trying again
+const int kNetworkDelay = 1000;
+// put function declarations here:
+
+double temperature;
+double humidity;
+double moisture;
+
+double PLANT_MAX_TEMP = 30;
+double PLANT_MIN_TEMP = 10;
+double PLANT_MAX_HUM;
+double PLANT_MIN_HUM;
+double PLANT_MAX_MOIST;
+double PLANT_MIN_MOIST;
+
+
+void nvs_access();
+
+void UI();
+void printInstructions();
+void set_values(double min_humidity, double max_humidity,
+                double min_moisture, double max_moisture);
+void check_values(double temp, double hum, double moist);
+
+
+
+void setup()
+{
+
+  Serial.begin(9600);
+
+  DHT.begin();   // temp-hum sensor
+
+  // Retrieve SSID/PASSWD from flash before anything else nvs_access();
+
+  // We start by connecting to a WiFi network
+  delay(2000);
+  Serial.println();
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println("UCInet Mobile Access");
+
+  WiFi.begin("Dragons!", "Drgn@2023!");
+  // WiFi.begin("UCInet Mobile Access", "\0");
+  
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  Serial.println("MAC address: ");
+  Serial.println(WiFi.macAddress());
+  Serial.println();
+  UI();
+
+}
+
+
+
+
+void loop() {
+  int err = 0;
+  WiFiClient c;
+  HttpClient http(c);
+  
+  moisture = analogRead(32);
+  Serial.println();
+  
+  DHT.read();
+  temperature = DHT.getTemperature();
+  humidity = DHT.getHumidity();
+
+  
+  Serial.println("Soil Moisture:");
+  Serial.println(moisture);
+
+
+  Serial.println("temperature:");
+  Serial.println(temperature);
+  Serial.println("humidity:");
+  Serial.println(humidity);
+  Serial.println();
+  check_values(temperature, humidity, moisture);
+
+
+  char var[100];
+  snprintf(var, 100, "/?Temp=%.2f&hum=%.2f&moisture=%.2f", temperature, humidity, moisture);
+
+  err = http.get("18.117.154.141", 5000, var, NULL); 
+
+  if (err == 0) {
+    // Serial.println("startedRequest ok");
+    err = http.responseStatusCode();
+
+    if (err >= 0) {
+      // Serial.print("Got status code: ");
+      // Serial.println(err);
+
+      // Usually you'd check that the response code is 200 or a similar "success" code (200-299) before carrying on,
+      // but we'll print out whatever response we get
+      err = http.skipResponseHeaders();
+
+      if (err >= 0) {
+        int bodyLen = http.contentLength();
+        // Serial.print("Content length is: ");
+        // Serial.println(bodyLen);
+        // Serial.println();
+        // Serial.println("Body returned follows:");
+
+        // Now we've got to the body, so we can print it out
+        unsigned long timeoutStart = millis();
+        char c;
+
+        // Whilst we haven't timed out & haven't reached the end of the body
+        while ((http.connected() || http.available()) && ((millis() - timeoutStart) < kNetworkTimeout)) {
+          if (http.available()) {
+            c = http.read();
+            // Print out this character
+            Serial.print(c);
+            bodyLen--;
+            // We read something, reset the timeout counter
+            timeoutStart = millis();
+          } else {
+            // We haven't got any data, so let's pause to allow some to arrive
+            delay(kNetworkDelay);
+          }
+        }
+      } else {
+        // Serial.print("Failed to skip response headers: ");
+        // Serial.println(err);
+      }
+    } else {
+      // Serial.print("Getting response failed: ");
+      // Serial.println(err);
+    }
+  } else {
+    // Serial.print("Connect failed: ");
+    // Serial.println(err);
+  }
+
+  http.stop();
+
+
+
+  // And just stop, now that we've tried a download
+  // while (1);
+  delay(2000);
+}
+
+
+
+void nvs_access()
+{
+  // Initialize NVS
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+  {
+    // NVS partition was truncated and needs to be erased
+    // Retry nvs_flash_init
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    err = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(err);
+
+  // Open
+  Serial.printf("\n");
+  Serial.printf("Opening Non-Volatile Storage (NVS) handle... ");
+  nvs_handle_t my_handle;
+  err = nvs_open("storage", NVS_READWRITE, &my_handle);
+  if (err != ESP_OK)
+  {
+    Serial.printf("Error (%s) opening NVS handle!\n", esp_err_to_name(err));
+  }
+  else
+  {
+    Serial.printf("Done\n");
+    Serial.printf("Retrieving SSID/PASSWD\n");
+    size_t ssid_len;
+    size_t pass_len;
+    err = nvs_get_str(my_handle, "ssid", ssid, &ssid_len);
+    err |= nvs_get_str(my_handle, "pass", pass, &pass_len);
+    switch (err)
+    {
+    case ESP_OK:
+      Serial.printf("Done\n");
+      //Serial.printf("SSID = %s\n", ssid);
+      //Serial.printf("PASSWD = %s\n", pass);
+      break;
+    case ESP_ERR_NVS_NOT_FOUND:
+      Serial.printf("The value is not initialized yet!\n");
+      break;
+    default:
+      Serial.printf("Error (%s) reading!\n", esp_err_to_name(err));
+    }
+  }
+  // Close
+  nvs_close(my_handle);
+}
+
+
+
+void check_values(double temp, double hum, double moist) {
+  if (temp < PLANT_MIN_TEMP) {
+    Serial.println("Plant needs to be warmer");
+  }
+  else if (temp > PLANT_MAX_TEMP) {
+    Serial.println("Plant is too warm");
+  }
+  
+
+  if (hum < PLANT_MIN_HUM) {
+    Serial.println("Plant needs to be in more humidity");
+  }
+  else if (hum > PLANT_MAX_HUM) {
+    Serial.println("Plant is in too humid conditions");
+  }
+
+
+  if (moist < PLANT_MIN_MOIST) {
+    Serial.println("Plant needs more water");
+  }
+  else if (moist > PLANT_MAX_MOIST) {
+    Serial.println("Plant has too much water");
+  }
+  
+}
+
+
+
+void UI() {
+  printInstructions();
+
+  while (!Serial.available()) {
+    delay(100);
+  }
+
+  String choice1 = Serial.readString(); 
+  
+  if(choice1 == "S"){
+      // 40 - 70% humidity
+      // need to be very dry. values from 10-100
+      set_values(40.0, 70.0, 10.0, 200.0);
+  }
+  else if(choice1 == "O"){
+      // // 40-70% humidity
+      // moderately watered. need to be 800 - 2000 
+      set_values(40.0, 70.0, 800.0, 3000.0);
+  }
+  else if(choice1 == "I") {
+      // 50-70% humidity
+      // moderately watered. need to be 800 - 2000
+      set_values(50.0, 70.0, 800.0, 2000.0);
+
+    
+  }
+}
+
+
+
+void printInstructions() {
+  Serial.println("WELCOME TO GLOW AND GROW");
+  Serial.println("WHAT TYPE OF PLANT ARE YOU TESTING?\n");
+  Serial.println("Indoor plant: These plants are suitable for growing indoors");
+  Serial.println("Examples: Peace Lily, Snake Plant, or Fiddle Leaf Fig");
+  Serial.println("Type 'I' to choose this option\n");
+  Serial.println("Outdoor plant: These plants are for gardens or yards");
+  Serial.println("Examples: roses, tulips, or tomatoes");
+  Serial.println("Type 'O' to choose this option\n");
+  Serial.println("Succulents and Cacti: These plants are known for storing water and don't require much care");
+  Serial.println("Examples: aloe vera, jade plant, and prickly pear");
+  Serial.println("Type 'S' to choose this option\n");
+}
+
+
+void set_values(double min_humidity, double max_humidity,
+                double min_moisture, double max_moisture) {
+  PLANT_MAX_HUM = max_humidity;
+  PLANT_MIN_HUM = min_humidity;
+  PLANT_MAX_MOIST = max_moisture;
+  PLANT_MIN_MOIST = min_moisture;
+}
